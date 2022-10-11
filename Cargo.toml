@@ -1,0 +1,31 @@
+[package]
+name = "prometools"
+version = "0.1.0"
+edition = "2021"
+description = "Extensions for prometheus-client"
+documentation = "https://docs.rs/prometools/0.1.0/"
+repository = "https://github.com/nox/prometools"
+keywords = ["prometheus", "serde", "serialization"]
+license = "MIT OR Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+test = false
+
+[features]
+serde = ["dep:itoa", "dep:parking_lot", "dep:ryu", "dep:serde"]
+
+[package.metadata.docs.rs]
+features = ["serde"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+itoa = { version = "1", optional = true }
+parking_lot = { version = "0.12.1", optional = true }
+prometheus-client = "0.18"
+ryu = { version = "1", optional = true }
+serde = { version = "1", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
