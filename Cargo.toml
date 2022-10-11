@@ -1,9 +1,9 @@
 [package]
 name = "prometools"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Extensions for prometheus-client"
-documentation = "https://docs.rs/prometools/0.1.0/"
+documentation = "https://docs.rs/prometools/0.1.1/"
 repository = "https://github.com/nox/prometools"
 keywords = ["prometheus", "serde", "serialization"]
 license = "MIT OR Apache-2.0"
