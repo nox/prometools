@@ -3,5 +3,5 @@
 pub mod histogram;
 pub mod nonstandard;
 #[cfg(feature = "serde")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod serde;
