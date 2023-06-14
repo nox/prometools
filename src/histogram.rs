@@ -13,12 +13,6 @@ use std::iter::once;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Extension trait for [`prometheus_client::metrics::histogram::Histogram`].
-pub trait HistogramExt {
-    /// Returns a timer whose value will be recorded in this histogram.
-    fn start_timer(&self) -> HistogramTimer;
-}
-
 /// A faster, lock-free histogram for tracking time.
 #[derive(Debug)]
 pub struct TimeHistogram {
@@ -41,16 +35,6 @@ struct Inner {
     sum: AtomicU64,
     count: AtomicU64,
     buckets: Vec<(f64, AtomicU64)>,
-}
-
-impl HistogramExt for TimeHistogram {
-    fn start_timer(&self) -> HistogramTimer {
-        HistogramTimer {
-            histogram: self.clone(),
-            observed: false,
-            start: Instant::now(),
-        }
-    }
 }
 
 impl HistogramTimer {
@@ -112,6 +96,14 @@ impl TimeHistogram {
                     .map(|upper_bound| (upper_bound, AtomicU64::new(0)))
                     .collect(),
             }),
+        }
+    }
+
+    pub fn start_timer(&self) -> HistogramTimer {
+        HistogramTimer {
+            histogram: self.clone(),
+            observed: false,
+            start: Instant::now(),
         }
     }
 
