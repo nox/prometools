@@ -111,7 +111,7 @@ impl TimeHistogram {
         self.observe_and_bucket(nanos);
     }
 
-    pub(crate) fn observe_and_bucket(&self, v: u64) -> Option<usize> {
+    fn observe_and_bucket(&self, v: u64) -> Option<usize> {
         self.inner.sum.fetch_add(v, Ordering::Relaxed);
         self.inner.count.fetch_add(1, Ordering::Relaxed);
 
@@ -131,7 +131,7 @@ impl TimeHistogram {
         }
     }
 
-    pub(crate) fn get(&self) -> (f64, u64, Vec<(f64, u64)>) {
+    fn get(&self) -> (f64, u64, Vec<(f64, u64)>) {
         let sum = seconds(self.inner.sum.load(Ordering::Relaxed));
         let count = self.inner.count.load(Ordering::Relaxed);
         let buckets = self
