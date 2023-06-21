@@ -30,6 +30,19 @@ jobs:
           command: fmt
           args: --all -- --check
 
+  check_features:
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@cargo-hack
+      - run: cargo hack check --each-feature
+
   test:
     name: Test ${{ matrix.rust }} on ${{ matrix.os }}
     needs: [style]
