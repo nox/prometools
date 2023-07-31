@@ -1,5 +1,6 @@
 //! Serde bridge.
-//!
+
+use crate::nonstandard::InfoGauge as InnerInfoGauge;
 use parking_lot::MappedRwLockReadGuard;
 use prometheus_client::{
     encoding::text::{Encode, EncodeMetric, Encoder},
@@ -145,6 +146,100 @@ where
             inner: self.inner.clone(),
         }
     }
+}
+
+/// A wrapper around [`crate::nonstandard::InfoGauge`] which
+/// encodes its labels with [`Serialize`] instead of [`Encode`].
+///
+/// #### Examples
+///
+/// Basic usage:
+///
+/// ```rust
+/// # use prometheus_client::{
+/// #     encoding::text::encode,
+/// #     registry::Registry,
+/// # };
+/// # use prometools::serde::InfoGauge;
+/// # use serde::Serialize;
+/// #
+/// #[derive(Serialize)]
+/// struct BuildInfo {
+///     version: &'static str,
+///     mode: Mode,
+/// }
+///
+/// #[derive(Serialize)]
+/// #[serde(rename_all = "lowercase")]
+/// enum Mode {
+///     Debug,
+///     Release,
+/// }
+///
+/// let info = InfoGauge::new(BuildInfo {
+///     version: "1.2.3",
+///     mode: Mode::Debug,
+/// });
+///
+/// let mut registry = Registry::default();
+///
+/// registry.register(
+///     "build_info",
+///     "Build information",
+///     info,
+/// );
+///
+/// let mut serialized = String::new();
+///
+/// // SAFETY: We know prometheus-client only writes UTF-8 slices.
+/// unsafe {
+///     encode(&mut serialized.as_mut_vec(), &registry).unwrap();
+/// }
+///
+/// assert_eq!(
+///     serialized,
+///     concat!(
+///         "# HELP build_info Build information.\n",
+///         "# TYPE build_info gauge\n",
+///         "build_info{version=\"1.2.3\",mode=\"debug\"} 1\n",
+///         "# EOF\n",
+///     ),
+/// );
+/// ```
+#[derive(Debug)]
+pub struct InfoGauge<S> {
+    inner: InnerInfoGauge<Bridge<S>>,
+}
+
+impl<S> InfoGauge<S>
+where
+    S: Serialize,
+{
+    pub fn new(label_set: S) -> Self {
+        Self {
+            inner: InnerInfoGauge::new(Bridge(label_set)),
+        }
+    }
+}
+
+impl<S> EncodeMetric for InfoGauge<S>
+where
+    S: Serialize,
+{
+    fn encode(&self, encoder: Encoder) -> io::Result<()> {
+        self.inner.encode(encoder)
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
+}
+
+impl<S> TypedMetric for InfoGauge<S>
+where
+    S: Serialize,
+{
+    const TYPE: MetricType = <InnerInfoGauge<S> as TypedMetric>::TYPE;
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
