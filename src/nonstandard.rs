@@ -65,3 +65,45 @@ where
         Self::TYPE
     }
 }
+
+/// An info gauge, similar to [`prometheus_client::metrics::info::Info`],
+/// but collected as a GAUGE with no suffix.
+///
+/// Useful in legacy systems who don't actually use the INFO metric type.
+///
+/// [`Info`]: `prometheus_client::metrics::info::Info`
+#[derive(Debug)]
+pub struct InfoGauge<S>(S);
+
+impl<S> InfoGauge<S>
+where
+    S: Encode,
+{
+    pub fn new(label_set: S) -> Self {
+        Self(label_set)
+    }
+}
+
+impl<S> TypedMetric for InfoGauge<S> {
+    const TYPE: MetricType = MetricType::Gauge;
+}
+
+impl<S> EncodeMetric for InfoGauge<S>
+where
+    S: Encode,
+{
+    fn encode(&self, mut encoder: Encoder) -> Result<(), std::io::Error> {
+        encoder
+            .with_label_set(&self.0)
+            .no_suffix()?
+            .no_bucket()?
+            .encode_value(1u32)?
+            .no_exemplar()?;
+
+        Ok(())
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
+}
