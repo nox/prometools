@@ -27,7 +27,8 @@ pub struct TimeHistogram {
 pub struct HistogramTimer {
     histogram: TimeHistogram,
     observed: bool,
-    start: Instant,
+    start: Option<Instant>,
+    accumulated: Duration,
 }
 
 #[derive(Debug)]
@@ -38,6 +39,27 @@ struct Inner {
 }
 
 impl HistogramTimer {
+    /// Pauses time tracking until `unpause` is called. Any time passed between this call and
+    /// calling `unpause` or `stop` is NOT counted.
+    ///
+    /// If the timer is already paused, then this call has no effect.
+    pub fn pause(&mut self) {
+        self.accumulated += self.start.map_or(Duration::ZERO, |value| {
+            Instant::now().saturating_duration_since(value)
+        });
+        self.start = None
+    }
+
+    /// Resumes time tracking, if the timer was paused, which means time after this call is tracked
+    /// again.
+    ///
+    /// If the timer is already un-paused or was not paused ever, then this call has no effect.
+    pub fn resume(&mut self) {
+        if self.start.is_none() {
+            self.start = Some(Instant::now());
+        }
+    }
+
     /// Observe, record and return timer duration (in seconds).
     ///
     /// It observes and returns a floating-point number for seconds elapsed since
@@ -57,7 +79,10 @@ impl HistogramTimer {
     }
 
     fn observe(&mut self, record: bool) -> Duration {
-        let elapsed = Instant::now().saturating_duration_since(self.start);
+        let elapsed_since_start = self.start.map_or(Duration::ZERO, |value| {
+            Instant::now().saturating_duration_since(value)
+        });
+        let elapsed = elapsed_since_start + self.accumulated;
 
         self.observed = true;
         if record {
@@ -103,7 +128,8 @@ impl TimeHistogram {
         HistogramTimer {
             histogram: self.clone(),
             observed: false,
-            start: Instant::now(),
+            start: Some(Instant::now()),
+            accumulated: Duration::new(0, 0),
         }
     }
 
@@ -202,7 +228,8 @@ impl EncodeMetric for TimeHistogram {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prometheus_client::metrics::histogram::exponential_buckets;
+    use prometheus_client::metrics::histogram::{exponential_buckets, linear_buckets};
+    use std::thread::sleep;
     use std::time::Duration;
 
     #[test]
@@ -221,5 +248,154 @@ mod tests {
         assert_eq!(2, buckets[0].1);
         assert_eq!(1, buckets[1].1);
         assert_eq!(1, buckets[4].1);
+    }
+
+    #[test]
+    fn timer_stop_and_record() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        let duration = timer.stop_and_record();
+
+        assert_eq!(duration.as_millis(), 0);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(count, 1)
+    }
+
+    #[test]
+    fn timer_stop_and_discard() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        let duration = timer.stop_and_discard();
+
+        assert_eq!(duration.as_millis(), 0);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(count, 0)
+    }
+
+    #[test]
+    fn timer_pause_stop() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        sleep(Duration::from_millis(10));
+        timer.pause();
+        sleep(Duration::from_millis(20));
+        let duration = timer.stop_and_record();
+
+        assert_eq!(duration.as_millis(), 10);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(buckets[0].1, 0);
+        assert_eq!(buckets[1].1, 1);
+        assert_eq!(buckets[2].1, 0);
+    }
+
+    #[test]
+    fn timer_pause_resume_stop() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        sleep(Duration::from_millis(10));
+        timer.pause();
+        sleep(Duration::from_millis(20));
+        timer.resume();
+        sleep(Duration::from_millis(40));
+        let duration = timer.stop_and_record();
+
+        assert_eq!(duration.as_millis(), 50);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(buckets[4].1, 0);
+        assert_eq!(buckets[5].1, 1);
+        assert_eq!(buckets[6].1, 0);
+    }
+
+    #[test]
+    fn timer_resume_stop() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        sleep(Duration::from_millis(10));
+        timer.resume();
+        sleep(Duration::from_millis(20));
+        let duration = timer.stop_and_record();
+
+        assert_eq!(duration.as_millis(), 30);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(buckets[2].1, 0);
+        assert_eq!(buckets[3].1, 1);
+        assert_eq!(buckets[4].1, 0);
+    }
+
+    #[test]
+    fn timer_pause_pause_stop() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        sleep(Duration::from_millis(10));
+        timer.pause();
+        sleep(Duration::from_millis(20));
+        timer.pause();
+        sleep(Duration::from_millis(40));
+        let duration = timer.stop_and_record();
+
+        assert_eq!(duration.as_millis(), 10);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(buckets[0].1, 0);
+        assert_eq!(buckets[1].1, 1);
+        assert_eq!(buckets[2].1, 0);
+    }
+
+    #[test]
+    fn timer_pause_resume_pause_stop() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        sleep(Duration::from_millis(10));
+        timer.pause();
+        sleep(Duration::from_millis(20));
+        timer.resume();
+        sleep(Duration::from_millis(40));
+        timer.pause();
+        sleep(Duration::from_millis(80));
+        let duration = timer.stop_and_record();
+
+        assert_eq!(duration.as_millis(), 10 + 40);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(buckets[4].1, 0);
+        assert_eq!(buckets[5].1, 1);
+        assert_eq!(buckets[6].1, 0);
+    }
+
+    #[test]
+    fn timer_pause_resume_pause_resume_stop() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 20));
+        let mut timer = histogram.start_timer();
+        sleep(Duration::from_millis(10));
+        timer.pause();
+        sleep(Duration::from_millis(20));
+        timer.resume();
+        sleep(Duration::from_millis(40));
+        timer.pause();
+        sleep(Duration::from_millis(80));
+        timer.resume();
+        sleep(Duration::from_millis(120));
+        let duration = timer.stop_and_record();
+
+        assert_eq!(duration.as_millis(), 10 + 40 + 120);
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(buckets[16].1, 0);
+        assert_eq!(buckets[17].1, 1);
+        assert_eq!(buckets[18].1, 0);
+    }
+
+    #[test]
+    fn timer_resume_drop() {
+        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
+        let mut timer = histogram.start_timer();
+        sleep(Duration::from_millis(10));
+        timer.pause();
+        sleep(Duration::from_millis(20));
+        timer.resume();
+        sleep(Duration::from_millis(40));
+        drop(timer);
+
+        let (sum, count, buckets) = histogram.get();
+        assert_eq!(buckets[4].1, 0);
+        assert_eq!(buckets[5].1, 1);
+        assert_eq!(buckets[6].1, 0);
     }
 }
