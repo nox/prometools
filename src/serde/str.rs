@@ -30,7 +30,7 @@ pub(super) struct AsciiPattern {
 impl AsciiPattern {
     /// Will fail to compile in a const context if the chars aren't ASCII.
     pub(super) const fn new(chars: &'static [u8]) -> Self {
-        #[allow(clippy::blocks_in_if_conditions)]
+        #[allow(clippy::blocks_in_conditions)]
         if {
             let mut i = 0;
             loop {
@@ -44,6 +44,7 @@ impl AsciiPattern {
         } {
             #[allow(unconditional_panic)]
             #[allow(clippy::no_effect)]
+            #[allow(clippy::out_of_bounds_indexing)]
             ([] as [u8; 0])[0]; // Invalid ASCII chars
         }
 

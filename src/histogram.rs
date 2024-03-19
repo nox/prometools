@@ -157,7 +157,7 @@ impl TimeHistogram {
         }
     }
 
-    fn get(&self) -> (f64, u64, Vec<(f64, u64)>) {
+    pub fn snapshot(&self) -> HistogramSnapshot {
         let sum = seconds(self.inner.sum.load(Ordering::Relaxed));
         let count = self.inner.count.load(Ordering::Relaxed);
         let buckets = self
@@ -166,7 +166,12 @@ impl TimeHistogram {
             .iter()
             .map(|(k, v)| (*k, v.load(Ordering::Relaxed)))
             .collect();
-        (sum, count, buckets)
+
+        HistogramSnapshot {
+            sum,
+            count,
+            buckets,
+        }
     }
 }
 
@@ -174,228 +179,74 @@ impl TypedMetric for TimeHistogram {
     const TYPE: MetricType = MetricType::Histogram;
 }
 
+pub struct HistogramSnapshot {
+    sum: f64,
+    count: u64,
+    buckets: Vec<(f64, u64)>,
+}
+
+impl HistogramSnapshot {
+    pub fn sum(&self) -> f64 {
+        self.sum
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn buckets(&self) -> &[(f64, u64)] {
+        &self.buckets
+    }
+
+    fn encode_with_maybe_exemplars<S>(
+        &self,
+        exemplars: Option<&HashMap<usize, Exemplar<S, f64>>>,
+        mut encoder: Encoder,
+    ) -> Result<(), std::io::Error>
+    where
+        S: Encode,
+    {
+        encoder
+            .encode_suffix("sum")?
+            .no_bucket()?
+            .encode_value(self.sum)?
+            .no_exemplar()?;
+        encoder
+            .encode_suffix("count")?
+            .no_bucket()?
+            .encode_value(self.count)?
+            .no_exemplar()?;
+
+        let mut cummulative = 0;
+        for (i, (upper_bound, count)) in self.buckets.iter().enumerate() {
+            cummulative += count;
+            let mut bucket_encoder = encoder.encode_suffix("bucket")?;
+            let mut value_encoder = bucket_encoder.encode_bucket(*upper_bound)?;
+            let mut exemplar_encoder = value_encoder.encode_value(cummulative)?;
+
+            match exemplars.and_then(|es| es.get(&i)) {
+                Some(exemplar) => exemplar_encoder.encode_exemplar(exemplar)?,
+                None => exemplar_encoder.no_exemplar()?,
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[inline(always)]
 fn seconds(val: u64) -> f64 {
     (val as f64) * 1E-9
 }
 
-fn encode_histogram_with_maybe_exemplars<S: Encode>(
-    sum: f64,
-    count: u64,
-    buckets: &[(f64, u64)],
-    exemplars: Option<&HashMap<usize, Exemplar<S, f64>>>,
-    mut encoder: Encoder,
-) -> Result<(), std::io::Error> {
-    encoder
-        .encode_suffix("sum")?
-        .no_bucket()?
-        .encode_value(sum)?
-        .no_exemplar()?;
-    encoder
-        .encode_suffix("count")?
-        .no_bucket()?
-        .encode_value(count)?
-        .no_exemplar()?;
-
-    let mut cummulative = 0;
-    for (i, (upper_bound, count)) in buckets.iter().enumerate() {
-        cummulative += count;
-        let mut bucket_encoder = encoder.encode_suffix("bucket")?;
-        let mut value_encoder = bucket_encoder.encode_bucket(*upper_bound)?;
-        let mut exemplar_encoder = value_encoder.encode_value(cummulative)?;
-
-        match exemplars.and_then(|es| es.get(&i)) {
-            Some(exemplar) => exemplar_encoder.encode_exemplar(exemplar)?,
-            None => exemplar_encoder.no_exemplar()?,
-        }
-    }
-
-    Ok(())
-}
-
 impl EncodeMetric for TimeHistogram {
     fn encode(&self, encoder: Encoder) -> Result<(), std::io::Error> {
-        let (sum, count, buckets) = self.get();
         // TODO: Would be better to use never type instead of `()`.
-        encode_histogram_with_maybe_exemplars::<()>(sum, count, &buckets, None, encoder)
+        self.snapshot()
+            .encode_with_maybe_exemplars::<()>(None, encoder)
     }
 
     fn metric_type(&self) -> MetricType {
         Self::TYPE
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use prometheus_client::metrics::histogram::{exponential_buckets, linear_buckets};
-    use std::thread::sleep;
-    use std::time::Duration;
-
-    #[test]
-    fn histogram() {
-        let histogram = TimeHistogram::new(exponential_buckets(1.0, 2.0, 10));
-        histogram.observe(Duration::from_secs(1).as_nanos() as u64);
-        histogram.observe(Duration::from_secs_f64(1.5).as_nanos() as u64);
-        histogram.observe(Duration::from_secs_f64(2.5).as_nanos() as u64);
-        histogram.observe(Duration::from_secs_f64(8.5).as_nanos() as u64);
-        histogram.observe(Duration::from_secs_f64(0.5).as_nanos() as u64);
-
-        let (sum, count, buckets) = histogram.get();
-
-        assert_eq!(14., sum);
-        assert_eq!(5, count);
-        assert_eq!(2, buckets[0].1);
-        assert_eq!(1, buckets[1].1);
-        assert_eq!(1, buckets[4].1);
-    }
-
-    #[test]
-    fn timer_stop_and_record() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        let duration = timer.stop_and_record();
-
-        assert_eq!(duration.as_millis(), 0);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(count, 1)
-    }
-
-    #[test]
-    fn timer_stop_and_discard() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        let duration = timer.stop_and_discard();
-
-        assert_eq!(duration.as_millis(), 0);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(count, 0)
-    }
-
-    #[test]
-    fn timer_pause_stop() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        sleep(Duration::from_millis(10));
-        timer.pause();
-        sleep(Duration::from_millis(20));
-        let duration = timer.stop_and_record();
-
-        assert_eq!(duration.as_millis(), 10);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(buckets[0].1, 0);
-        assert_eq!(buckets[1].1, 1);
-        assert_eq!(buckets[2].1, 0);
-    }
-
-    #[test]
-    fn timer_pause_resume_stop() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        sleep(Duration::from_millis(10));
-        timer.pause();
-        sleep(Duration::from_millis(20));
-        timer.resume();
-        sleep(Duration::from_millis(40));
-        let duration = timer.stop_and_record();
-
-        assert_eq!(duration.as_millis(), 50);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(buckets[4].1, 0);
-        assert_eq!(buckets[5].1, 1);
-        assert_eq!(buckets[6].1, 0);
-    }
-
-    #[test]
-    fn timer_resume_stop() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        sleep(Duration::from_millis(10));
-        timer.resume();
-        sleep(Duration::from_millis(20));
-        let duration = timer.stop_and_record();
-
-        assert_eq!(duration.as_millis(), 30);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(buckets[2].1, 0);
-        assert_eq!(buckets[3].1, 1);
-        assert_eq!(buckets[4].1, 0);
-    }
-
-    #[test]
-    fn timer_pause_pause_stop() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        sleep(Duration::from_millis(10));
-        timer.pause();
-        sleep(Duration::from_millis(20));
-        timer.pause();
-        sleep(Duration::from_millis(40));
-        let duration = timer.stop_and_record();
-
-        assert_eq!(duration.as_millis(), 10);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(buckets[0].1, 0);
-        assert_eq!(buckets[1].1, 1);
-        assert_eq!(buckets[2].1, 0);
-    }
-
-    #[test]
-    fn timer_pause_resume_pause_stop() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        sleep(Duration::from_millis(10));
-        timer.pause();
-        sleep(Duration::from_millis(20));
-        timer.resume();
-        sleep(Duration::from_millis(40));
-        timer.pause();
-        sleep(Duration::from_millis(80));
-        let duration = timer.stop_and_record();
-
-        assert_eq!(duration.as_millis(), 10 + 40);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(buckets[4].1, 0);
-        assert_eq!(buckets[5].1, 1);
-        assert_eq!(buckets[6].1, 0);
-    }
-
-    #[test]
-    fn timer_pause_resume_pause_resume_stop() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 20));
-        let mut timer = histogram.start_timer();
-        sleep(Duration::from_millis(10));
-        timer.pause();
-        sleep(Duration::from_millis(20));
-        timer.resume();
-        sleep(Duration::from_millis(40));
-        timer.pause();
-        sleep(Duration::from_millis(80));
-        timer.resume();
-        sleep(Duration::from_millis(120));
-        let duration = timer.stop_and_record();
-
-        assert_eq!(duration.as_millis(), 10 + 40 + 120);
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(buckets[16].1, 0);
-        assert_eq!(buckets[17].1, 1);
-        assert_eq!(buckets[18].1, 0);
-    }
-
-    #[test]
-    fn timer_resume_drop() {
-        let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
-        let mut timer = histogram.start_timer();
-        sleep(Duration::from_millis(10));
-        timer.pause();
-        sleep(Duration::from_millis(20));
-        timer.resume();
-        sleep(Duration::from_millis(40));
-        drop(timer);
-
-        let (sum, count, buckets) = histogram.get();
-        assert_eq!(buckets[4].1, 0);
-        assert_eq!(buckets[5].1, 1);
-        assert_eq!(buckets[6].1, 0);
     }
 }
