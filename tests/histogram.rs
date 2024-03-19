@@ -208,6 +208,12 @@ fn assert_duration(duration: Duration, ms: u128) {
     let duration_ms = duration.as_millis();
     let max_ms = ms + 20;
 
-    assert!(duration_ms >= ms, "duration {duration_ms} should be at least {ms}");
-    assert!(duration_ms < max_ms, "duration {duration_ms} should be at most {max_ms}");
+    assert!(
+        duration_ms >= ms,
+        "duration {duration_ms} should be at least {ms}"
+    );
+    assert!(
+        duration_ms < max_ms,
+        "duration {duration_ms} should be at most {max_ms}"
+    );
 }
