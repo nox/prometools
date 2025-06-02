@@ -24,6 +24,7 @@ pub struct TimeHistogram {
 /// This timer can be stopped and observed at most once, either automatically
 /// (when it goes out of scope) or manually. Alternatively, it can be manually
 /// stopped and discarded in order to not record its value.
+#[must_use = "HistogramTimer measures on Drop so should assigned to named variable"]
 pub struct HistogramTimer {
     histogram: TimeHistogram,
     observed: bool,
