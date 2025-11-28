@@ -16,6 +16,10 @@ test = false
 [features]
 serde = ["dep:itoa", "dep:parking_lot", "dep:ryu", "dep:serde"]
 
+[[test]]
+name = "family"
+required-features = ["serde"]
+
 [package.metadata.docs.rs]
 features = ["serde"]
 rustdoc-args = ["--cfg", "docsrs"]

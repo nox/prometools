@@ -1,23 +1,20 @@
 //! Serde bridge.
 
 use crate::nonstandard::InfoGauge as InnerInfoGauge;
-use parking_lot::MappedRwLockReadGuard;
+use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use prometheus_client::{
     encoding::text::{Encode, EncodeMetric, Encoder},
-    metrics::{
-        family::{Family as InnerFamily, MetricConstructor},
-        MetricType, TypedMetric,
-    },
+    metrics::{family::MetricConstructor, MetricType, TypedMetric},
 };
 use serde::ser::Serialize;
-use std::{fmt, hash::Hash, io};
+use std::{collections::HashMap, fmt, hash::Hash, io, sync::Arc};
 
 mod error;
 mod str;
 mod top;
 mod value;
 
-/// A wrapper around [`prometheus_client::metrics::family::Family`] which
+/// A version of [`prometheus_client::metrics::family::Family`] which
 /// encodes its labels with [`Serialize`] instead of [`Encode`].
 ///
 /// #### Examples
@@ -79,16 +76,21 @@ mod value;
 /// ```
 #[derive(Debug)]
 pub struct Family<S, M, C = fn() -> M> {
-    inner: InnerFamily<Bridge<S>, M, C>,
+    /// Map of labels to metric instances.
+    metrics: Arc<RwLock<HashMap<Bridge<S>, M>>>,
+    /// Function to construct fresh metric instances.
+    constructor: C,
 }
 
 impl<S, M, C> Family<S, M, C>
 where
     S: Clone + Eq + Hash,
 {
+    /// Create a metric family using a custom constructor to construct new metrics.
     pub fn new_with_constructor(constructor: C) -> Self {
         Self {
-            inner: InnerFamily::new_with_constructor(constructor),
+            metrics: Default::default(),
+            constructor,
         }
     }
 }
@@ -99,9 +101,7 @@ where
     M: Default,
 {
     fn default() -> Self {
-        Self {
-            inner: Default::default(),
-        }
+        Self::new_with_constructor(M::default)
     }
 }
 
@@ -110,8 +110,40 @@ where
     S: Clone + Eq + Hash,
     C: MetricConstructor<M>,
 {
-    pub fn get_or_create(&self, label_set: &S) -> MappedRwLockReadGuard<M> {
-        self.inner.get_or_create(Bridge::from_ref(label_set))
+    /// Access a metric with the given label set, creating it if one does not yet exist.
+    ///
+    /// This can deadlock when called while holding a reference to another metric in the
+    /// family. Make sure to drop the reference or convert it into an owned value beforehand.
+    pub fn get_or_create(&self, label_set: &S) -> MappedRwLockReadGuard<'_, M> {
+        let label_set = Bridge::from_ref(label_set);
+        if let Ok(m) = RwLockReadGuard::try_map(self.metrics.read(), |map| map.get(label_set)) {
+            return m;
+        }
+
+        let mut map_write = self.metrics.write();
+        map_write
+            .entry(label_set.clone())
+            .or_insert_with(|| self.constructor.new_metric());
+
+        let map_read = RwLockWriteGuard::downgrade(map_write);
+        RwLockReadGuard::map(map_read, |map| {
+            // The atomic downgrade ensures no other writer can have remove the metric
+            map.get(label_set)
+                .expect("metric should exist after creating it")
+        })
+    }
+
+    /// Remove a label set from the metric family.
+    ///
+    /// Returns a bool indicating if the label set was present or not.
+    pub fn remove(&self, label_set: &S) -> bool {
+        let label_set = Bridge::from_ref(label_set);
+        self.metrics.write().remove(label_set).is_some()
+    }
+
+    /// Clear all label sets from the metric family.
+    pub fn clear(&self) {
+        self.metrics.write().clear();
     }
 }
 
@@ -121,8 +153,13 @@ where
     M: EncodeMetric + TypedMetric,
     C: MetricConstructor<M>,
 {
-    fn encode(&self, encoder: Encoder) -> io::Result<()> {
-        self.inner.encode(encoder)
+    fn encode(&self, mut encoder: Encoder) -> io::Result<()> {
+        let map_read = self.metrics.read();
+        for (label_set, m) in map_read.iter() {
+            let enc = encoder.with_label_set(label_set);
+            m.encode(enc)?;
+        }
+        Ok(())
     }
 
     fn metric_type(&self) -> MetricType {
@@ -143,7 +180,8 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            metrics: Arc::clone(&self.metrics),
+            constructor: self.constructor.clone(),
         }
     }
 }

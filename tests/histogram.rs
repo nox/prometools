@@ -1,7 +1,20 @@
 use prometheus_client::metrics::histogram::{exponential_buckets, linear_buckets};
-use prometools::histogram::TimeHistogram;
+use prometools::histogram::{HistogramSnapshot, TimeHistogram};
 use std::thread::sleep;
 use std::time::Duration;
+
+// macOS CI runners have notoriously large time skew on sleep() system calls,
+// so we skip tests that are sensitive to sleep duration on those runners.
+// See (for example) https://stackoverflow.com/q/48285535 and
+// https://travis-ci.community/t/sleep-functions-are-not-accurate-on-macos/6122
+macro_rules! skip_if_mac_runner {
+    () => {{
+        if cfg!(target_os = "macos") && std::env::var_os("CI").is_some() {
+            eprintln!("skipping test on macOS CI runner");
+            return;
+        }
+    }};
+}
 
 #[test]
 fn histogram() {
@@ -46,6 +59,8 @@ fn timer_stop_and_discard() {
 
 #[test]
 fn timer_pause_stop() {
+    skip_if_mac_runner!();
+
     let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
     let mut timer = histogram.start_timer();
 
@@ -56,17 +71,13 @@ fn timer_pause_stop() {
     let duration = timer.stop_and_record();
 
     assert_duration(duration, 10);
-
-    let snapshot = histogram.snapshot();
-    let buckets = snapshot.buckets();
-
-    assert_eq!(buckets[0].1, 0);
-    assert_eq!(buckets[1].1, 1);
-    assert_eq!(buckets[2].1, 0);
+    assert_timer_bucket(duration, &histogram.snapshot());
 }
 
 #[test]
 fn timer_pause_resume_stop() {
+    skip_if_mac_runner!();
+
     let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
     let mut timer = histogram.start_timer();
 
@@ -79,17 +90,13 @@ fn timer_pause_resume_stop() {
     let duration = timer.stop_and_record();
 
     assert_duration(duration, 50);
-
-    let snapshot = histogram.snapshot();
-    let buckets = snapshot.buckets();
-
-    assert_eq!(buckets[4].1, 0);
-    assert_eq!(buckets[5].1, 1);
-    assert_eq!(buckets[6].1, 0);
+    assert_timer_bucket(duration, &histogram.snapshot());
 }
 
 #[test]
 fn timer_resume_stop() {
+    skip_if_mac_runner!();
+
     let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
     let mut timer = histogram.start_timer();
 
@@ -100,17 +107,13 @@ fn timer_resume_stop() {
     let duration = timer.stop_and_record();
 
     assert_duration(duration, 30);
-
-    let snapshot = histogram.snapshot();
-    let buckets = snapshot.buckets();
-
-    assert_eq!(buckets[2].1, 0);
-    assert_eq!(buckets[3].1, 1);
-    assert_eq!(buckets[4].1, 0);
+    assert_timer_bucket(duration, &histogram.snapshot());
 }
 
 #[test]
 fn timer_pause_pause_stop() {
+    skip_if_mac_runner!();
+
     let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
     let mut timer = histogram.start_timer();
 
@@ -123,17 +126,13 @@ fn timer_pause_pause_stop() {
     let duration = timer.stop_and_record();
 
     assert_duration(duration, 10);
-
-    let snapshot = histogram.snapshot();
-    let buckets = snapshot.buckets();
-
-    assert_eq!(buckets[0].1, 0);
-    assert_eq!(buckets[1].1, 1);
-    assert_eq!(buckets[2].1, 0);
+    assert_timer_bucket(duration, &histogram.snapshot());
 }
 
 #[test]
 fn timer_pause_resume_pause_stop() {
+    skip_if_mac_runner!();
+
     let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
     let mut timer = histogram.start_timer();
 
@@ -148,17 +147,13 @@ fn timer_pause_resume_pause_stop() {
     let duration = timer.stop_and_record();
 
     assert_duration(duration, 10 + 40);
-
-    let snapshot = histogram.snapshot();
-    let buckets = snapshot.buckets();
-
-    assert_eq!(buckets[4].1, 0);
-    assert_eq!(buckets[5].1, 1);
-    assert_eq!(buckets[6].1, 0);
+    assert_timer_bucket(duration, &histogram.snapshot());
 }
 
 #[test]
 fn timer_pause_resume_pause_resume_stop() {
+    skip_if_mac_runner!();
+
     let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 20));
     let mut timer = histogram.start_timer();
 
@@ -175,17 +170,13 @@ fn timer_pause_resume_pause_resume_stop() {
     let duration = timer.stop_and_record();
 
     assert_duration(duration, 10 + 40 + 120);
-
-    let snapshot = histogram.snapshot();
-    let buckets = snapshot.buckets();
-
-    assert_eq!(buckets[16].1, 0);
-    assert_eq!(buckets[17].1, 1);
-    assert_eq!(buckets[18].1, 0);
+    assert_timer_bucket(duration, &histogram.snapshot());
 }
 
 #[test]
 fn timer_resume_drop() {
+    skip_if_mac_runner!();
+
     let histogram = TimeHistogram::new(linear_buckets(0.01, 0.01, 12));
     let mut timer = histogram.start_timer();
 
@@ -196,14 +187,12 @@ fn timer_resume_drop() {
     sleep(Duration::from_millis(40));
     drop(timer);
 
-    let snapshot = histogram.snapshot();
-    let buckets = snapshot.buckets();
-
-    assert_eq!(buckets[4].1, 0);
-    assert_eq!(buckets[5].1, 1);
-    assert_eq!(buckets[6].1, 0);
+    // +1 because sleep is not exact
+    let duration = Duration::from_millis(10 + 40 + 1);
+    assert_timer_bucket(duration, &histogram.snapshot());
 }
 
+#[track_caller]
 fn assert_duration(duration: Duration, ms: u128) {
     let duration_ms = duration.as_millis();
     let max_ms = ms + 20;
@@ -216,4 +205,22 @@ fn assert_duration(duration: Duration, ms: u128) {
         duration_ms < max_ms,
         "duration {duration_ms} should be at most {max_ms}"
     );
+}
+
+#[track_caller]
+fn assert_timer_bucket(duration: Duration, snap: &HistogramSnapshot) {
+    let seconds = duration.as_secs_f64();
+    let buckets = snap.buckets();
+    let bucket_idx = buckets
+        .iter()
+        .position(|&(bound, _)| seconds <= bound)
+        .expect("duration should fit within available buckets");
+
+    assert!(0 < bucket_idx && bucket_idx + 1 < buckets.len());
+    let window = [
+        buckets[bucket_idx - 1].1,
+        buckets[bucket_idx].1,
+        buckets[bucket_idx + 1].1,
+    ];
+    assert_eq!(&window, &[0, 1, 0]);
 }
